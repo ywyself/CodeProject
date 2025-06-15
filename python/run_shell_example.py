@@ -85,15 +85,15 @@ def exec_command(command, interval=1, max_exec_timeout=30, max_terminate_timeout
     )
 
     output_lines = []
-    success_detected = threading.Event()  # Python 提供的线程同步原语，用于在不同线程之间安全地传递“某个状态是否发生”的信号。
+    kill_signal = threading.Event()  # Python 提供的线程同步原语，用于在不同线程之间安全地传递“某个状态是否发生”的信号。
 
     def read_proc_stdout():
         for line in iter(proc.stdout.readline, ''):  # subprocess.stdout.readline() 是阻塞的。
             print(line, end='')  # 实时输出
             output_lines.append(line)
             if predicate_to_kill and predicate_to_kill(line.lower()):
-                success_detected.set()  # 把 Event 设置为已触发（True）
-                # break  # 这里块而已在触发后停止打印
+                kill_signal.set()  # 把 Event 设置为已触发（True）
+                # break  # 这里可以在触发后停止打印
 
     thread = threading.Thread(target=read_proc_stdout)
     thread.start()
@@ -104,7 +104,7 @@ def exec_command(command, interval=1, max_exec_timeout=30, max_terminate_timeout
             print("[INFO] Process finished.")
             break
 
-        if success_detected.is_set():  # 查询 Event 是否已触发
+        if kill_signal.is_set():  # 查询 Event 是否已触发
             print(f"[INFO] Predicate True. Waiting {wait_before_kill}s then terminating process...")
             if wait_before_kill > 0:
                 time.sleep(wait_before_kill)
@@ -119,13 +119,13 @@ def exec_command(command, interval=1, max_exec_timeout=30, max_terminate_timeout
         time.sleep(interval)
 
     # 让主线程等 read_proc_stdout 这个输出监听线程把活干完
-    thread.join()
+    thread.join(timeout=5)
 
     returncode = proc.poll()
     return {
         "returncode": returncode,
         "output": ''.join(output_lines),
-        "success": success_detected.is_set()
+        "success": kill_signal.is_set()
     }
 
 
