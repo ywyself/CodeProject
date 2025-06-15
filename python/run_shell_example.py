@@ -15,7 +15,7 @@ from typing import Callable, Union
 # 这行代码是为了让子进程启动新会话（process group leader），这样我们就可以用 killpg 终止它和它的子孙。
 
 
-def terminate_proc_gracefully(proc: subprocess.Popen, timeout: int = 10) -> int:
+def terminate_proc_gracefully(proc: subprocess.Popen, timeout: float = 10) -> int:
     """
     安全地终止 subprocess：
     - 如果是独立进程组，则发送 SIGTERM 给整个进程组，等待其优雅退出；
@@ -59,28 +59,44 @@ def terminate_proc_gracefully(proc: subprocess.Popen, timeout: int = 10) -> int:
     return proc.returncode
 
 
-def exec_command(command, interval=1, max_exec_timeout=30, max_terminate_timeout=5,
+def exec_command(command: str, cwd: str = None, interval=1, max_exec_timeout=30, max_terminate_timeout=5,
                  predicate_to_kill: Union[None, Callable[[str], bool]] = None, wait_before_kill=3):
     """
     运行 shell 命令，实时读取输出
 
     :param command: 待执行的命令
-    :param interval: 检查命令是否结束
+    :param cwd: 工作路径
+    :param interval: 检查命令是否结束循环间隔时间
     :param max_exec_timeout: 命令执行的超时时间
     :param max_terminate_timeout: 终止命令执行的最大等待时间
     :param predicate_to_kill: 根据命令的输出，判断是否需要终止命令
     :param wait_before_kill: 终止命令前的等待时间
     :return: 最终的 returncode
     """
+    if cwd is None:
+        cwd = os.getcwd()
+    # 方式一：控制简单，适合无特殊需求。等价于 /bin/bash -c "<your command>"
+    # proc = subprocess.Popen(
+    #     command,
+    #     executable="/bin/bash",
+    #     shell=True,
+    #     cwd=cwd,
+    #     stdout=subprocess.PIPE,
+    #     stderr=subprocess.STDOUT,
+    #     text=True,
+    #     bufsize=1,
+    #     preexec_fn=os.setsid  # 非常关键！创建新进程组, 用来 later kill entire process group
+    # )
 
+    # 方式二：更像真实终端行为，适合依赖系统配置场景。-l（登录 shell
     proc = subprocess.Popen(
-        command,
-        shell=True,
+        ["/bin/bash", "-l", "-c", command],
+        shell=False,
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        executable="/bin/bash",
         preexec_fn=os.setsid  # 非常关键！创建新进程组, 用来 later kill entire process group
     )
 
