@@ -1,161 +1,128 @@
 """
 weighted_data_distributor.py
------------------------------
+=============================
 
 功能：
-    按指定权重将一组数据顺序分配到多个分组，支持三种尾部分配策略：
-    - 按比例（proportional）：最大余数法，尽量按比例分配尾巴。
-    - 轮询公平（round_robin）：一个一个交替分配，尾巴分配更公平。
-    - 顺序填充（sequential_fill）：优先填满第一个组，依次填充。
+    按指定权重将数据分配到多个分组，支持两种分配模式，保证比例严格按照权重。
 
-适用场景：
-    - 批量任务分配（如多台服务器负载分配）
-    - 数据切片（如训练集按权重分成子集）
-    - 权重驱动的资源调度
+分配模式：
+    1. **chunk**       - 块分配模式：
+        每个分组按计算好的数量一次性连续取数。例如：
+        A: [1,2,3], B: [4,5], C: [6]
 
-策略对比表：
-    假设权重 {A:5, B:3, C:1}，数据共 14 个（比总权重 9 多 5 个尾巴）
+    2. **round_robin** - 轮询分配模式：
+        每个分组交替取数，直到达到目标数量，避免长连续块。例如：
+        A: [1,4,7], B: [2,5], C: [3,6]
 
-    ┌───────────────────┬──────────────────────────────────────────────┐
-    │ 策略              │ 尾巴 5 个时的处理方式                        │
-    ├───────────────────┼──────────────────────────────────────────────┤
-    │ proportional       │ 尾巴按比例：A=3, B=2, C=0                    │
-    │ round_robin        │ 尾巴轮询：A=2, B=2, C=1（更公平）            │
-    │ sequential_fill    │ 尾巴顺序填：A=5, B=0, C=0（大权重优先）      │
-    └───────────────────┴──────────────────────────────────────────────┘
+分配规则：
+    - 总数按照权重比例分配（采用**最大余数法**保证整数且尽量公平）。
+    - 模式仅影响分配顺序，不影响最终数量。
 
-使用示例：
-    >>> from weighted_data_distributor import distribute_by_weights
+典型应用：
+    - 按业务优先级（权重）分配任务
+    - 按权重拆分数据集
+    - 按比例分配资源
 
-    >>> weights = {"A": 5, "B": 3, "C": 1}
-    >>> data = list(range(1, 15))  # 共 14 个元素
+示例：
+    >>> weights = {"A": 6, "B": 3, "C": 1, "D": 2}
+    >>> data = list(range(1, 16))
 
-    # 策略 1：按比例
-    >>> distribute_by_weights(data, weights, "proportional")
-    {'A': [1,2,3,4,5,10,11,12], 'B': [6,7,8,13,14], 'C': [9]}
+    >>> distribute_by_weights(data, weights, mode="chunk")
+    {'A': [1, 2, 3, 4, 5, 6], 'B': [7, 8, 9], 'C': [10], 'D': [11, 12]}
 
-    # 策略 2：轮询
-    >>> distribute_by_weights(data, weights, "round_robin")
-    {'A': [1,2,3,4,5,10,13], 'B': [6,7,8,11,14], 'C': [9,12]}
-
-    # 策略 3：顺序填充
-    >>> distribute_by_weights(data, weights, "sequential_fill")
-    {'A': [1,2,3,4,5,10,11,12,13,14], 'B': [6,7,8], 'C': [9]}
-
-作者：ChatGPT
-版本：1.0
-Python：3.7+
+    >>> distribute_by_weights(data, weights, mode="round_robin")
+    {'A': [1, 5, 9, 11, 13, 15], 'B': [2, 6, 10], 'C': [3], 'D': [4, 7]}
 """
 
-from typing import List, Dict
+from typing import Dict, List, Any
 
 
-def distribute_by_weights(data: List[int], weights: Dict[str, int], strategy: str = "proportional") -> Dict[str, List[int]]:
+def distribute_by_weights(
+    data: List[Any],
+    weights: Dict[str, int],
+    mode: str = "chunk",
+) -> Dict[str, List[Any]]:
     """
-    按照给定的权重，将数据按顺序分配到多个分组，支持三种策略：
+    按指定权重将数据分配到多个分组。
 
     参数：
-        data (List[int]): 需要分配的数据列表。
-        weights (Dict[str, int]): 权重配置，如 {"A": 5, "B": 3, "C": 1}。
-        strategy (str): 分配策略，可选值：
-            - "proportional"     最大余数法（按比例分配）
-            - "round_robin"      公平轮询分配
-            - "sequential_fill"  顺序优先填充
+        data (List[Any]): 待分配的数据列表。
+        weights (Dict[str, int]): {组名: 权重}，权重必须为非负整数。
+        mode (str): 分配模式：
+            - "chunk"       : 块分配（每组一次性连续取数）
+            - "round_robin" : 严格比例下轮询分配（避免长连续块）
 
     返回：
-        Dict[str, List[int]]: 每个 key 对应的数据子集。
-
-    示例：
-        distribute_by_weights([1,2,3,4,5,6], {"A":2,"B":1}, strategy="round_robin")
+        Dict[str, List[Any]]: {组名: [分配的数据]}
     """
-    if not data:
-        return {key: [] for key in weights}
+    # 初始化返回结构
+    result: Dict[str, List[Any]] = {k: [] for k in weights}
 
-    total_weight = sum(weights.values())
-    num_items = len(data)
-    result = {key: [] for key in weights}
+    # 预处理权重，过滤无效分组
+    active_keys = [k for k, w in weights.items() if w > 0]
+    if not active_keys or len(data) == 0:
+        return result
 
-    # 每一轮的完整分配容量
-    full_round, remainder = divmod(num_items, total_weight)
+    total_items = len(data)
+    total_weight = sum(weights[k] for k in active_keys)
 
-    # 先分配完整轮次
+    # ==============================
+    # Step 1: 计算每组的目标数量（严格按比例）
+    # ==============================
+    quotas_float = {
+        k: total_items * (weights[k] / total_weight) for k in active_keys
+    }
+    # 向下取整的基础分配
+    base_alloc = {k: int(quotas_float[k]) for k in active_keys}
+    allocated = sum(base_alloc.values())
+    leftover = total_items - allocated
+
+    # 剩余数量按最大余数法分配
+    remainder_order = sorted(
+        active_keys, key=lambda k: (quotas_float[k] - base_alloc[k]), reverse=True
+    )
+    for key in remainder_order:
+        if leftover <= 0:
+            break
+        base_alloc[key] += 1
+        leftover -= 1
+
+    # ==============================
+    # Step 2: 根据模式分配数据
+    # ==============================
     index = 0
-    for key, weight in weights.items():
-        take = weight * full_round
-        result[key].extend(data[index:index + take])
-        index += take
+    if mode == "chunk":
+        # 块分配：每组连续取目标数量
+        for key in active_keys:
+            take = base_alloc[key]
+            if take > 0:
+                result[key].extend(data[index : index + take])
+                index += take
 
-    # 尾巴处理
-    if remainder > 0:
-        if strategy == "proportional":
-            _allocate_remainder_proportional(result, data, index, remainder, weights, total_weight)
-        elif strategy == "round_robin":
-            _allocate_remainder_round_robin(result, data, index, remainder, weights)
-        elif strategy == "sequential_fill":
-            _allocate_remainder_sequential(result, data, index, remainder, weights)
-        else:
-            raise ValueError(f"未知策略: {strategy}")
+    elif mode == "round_robin":
+        # 轮询分配：每次给一个分组，直到该分组达到目标数量
+        remaining = base_alloc.copy()
+        while index < total_items:
+            for key in active_keys:
+                if remaining[key] > 0:
+                    result[key].append(data[index])
+                    remaining[key] -= 1
+                    index += 1
+                    if index >= total_items:
+                        break
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
 
     return result
 
 
-def _allocate_remainder_proportional(result, data, index, remainder, weights, total_weight):
-    """按比例（最大余数法）分配尾巴"""
-    quotas = {}
-    for key, weight in weights.items():
-        share = (weight / total_weight) * remainder
-        quotas[key] = (int(share), share - int(share))
-
-    # 先分配整数部分
-    for key, (integer_part, _) in quotas.items():
-        if integer_part > 0:
-            result[key].extend(data[index:index + integer_part])
-            index += integer_part
-
-    # 分配剩余的，按小数部分从大到小排序
-    sorted_keys = sorted(quotas.keys(), key=lambda k: quotas[k][1], reverse=True)
-    while index < len(data):
-        for key in sorted_keys:
-            if index < len(data):
-                result[key].append(data[index])
-                index += 1
-            else:
-                break
-
-
-def _allocate_remainder_round_robin(result, data, index, remainder, weights):
-    """尾巴逐个轮询分配"""
-    keys = list(weights.keys())
-    while index < len(data):
-        for key in keys:
-            if index < len(data):
-                result[key].append(data[index])
-                index += 1
-            else:
-                break
-
-
-def _allocate_remainder_sequential(result, data, index, remainder, weights):
-    """尾巴顺序优先填充"""
-    for key in weights.keys():
-        while remainder > 0 and index < len(data):
-            result[key].append(data[index])
-            index += 1
-            remainder -= 1
-        if remainder == 0:
-            break
-
-
 if __name__ == "__main__":
-    # 测试代码
-    weights = {"A": 5, "B": 3, "C": 1}
-    data = list(range(1, 15))  # 共 14 个元素
+    # 测试用例
+    weights = {"A": 6, "B": 3, "C": 1, "D": 2}
+    data = list(range(1, 16))
 
-    print("策略：proportional")
-    print(distribute_by_weights(data, weights, "proportional"))
+    print("【chunk 模式】")
+    print(distribute_by_weights(data, weights, mode="chunk"))
 
-    print("\n策略：round_robin")
-    print(distribute_by_weights(data, weights, "round_robin"))
-
-    print("\n策略：sequential_fill")
-    print(distribute_by_weights(data, weights, "sequential_fill"))
+    print("\n【round_robin 模式】")
+    print(distribute_by_weights(data, weights, mode="round_robin"))
