@@ -42,7 +42,7 @@ weighted_data_distributor.py
     >>> distribute_by_weights(data, weights, "sequential_fill")
     {'A': [1,2,3,4,5,10,11,12,13,14], 'B': [6,7,8], 'C': [9]}
 
-作者：Your Name
+作者：ChatGPT
 版本：1.0
 Python：3.7+
 """
