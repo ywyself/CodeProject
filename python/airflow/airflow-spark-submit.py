@@ -134,8 +134,7 @@ def get_kubectl_pod_status(pod_name):
         return "Unknown"
 
 
-def wait_driver_and_get_name(submit_wait_timeout=3600, submit_check_interval=10, pod_wait_timeout=600,
-                             pod_check_interval=5, **kwargs):
+def wait_driver_and_get_name(**kwargs):
     """
     1) 等待 spark_submit 进入 RUNNING（或已 SUCCESS）状态（不直接退出）
     2) 在其开始运行后，轮询获取 driver pod name，直到 pod 出现或超时
@@ -143,6 +142,11 @@ def wait_driver_and_get_name(submit_wait_timeout=3600, submit_check_interval=10,
     """
     ti = kwargs['ti']
     dag_run = kwargs['dag_run']
+    submit_wait_timeout = kwargs['params'].get('submit_wait_timeout', 3600)
+    submit_check_interval = kwargs['params'].get('submit_check_interval', 10)
+    pod_wait_timeout = kwargs['params'].get('pod_wait_timeout', 600)
+    pod_check_interval = kwargs['params'].get('pod_check_interval', 5)
+
     ti.xcom_push(key='driver_namespace', value=NAMESPACE)
 
     # ---- 1) 等待 spark_submit 开始运行 ----
@@ -237,6 +241,12 @@ with DAG(
     wait_driver = PythonOperator(
         task_id="wait_driver",
         python_callable=wait_driver_and_get_name,
+        params={
+            "submit_wait_timeout": 3600,
+            "submit_check_interval": 10,
+            "pod_wait_timeout": 600,
+            "pod_check_interval": 5,
+        },
     )
 
     # 3) 日志监控 + 清理（合并）：从 XCom 取 pod name；若存在则后台跟随日志，并在 pod 结束后删除 pod
