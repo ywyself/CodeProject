@@ -10,9 +10,9 @@ from airflow.operators.python import PythonOperator
 from airflow.utils.state import State
 from airflow.utils.trigger_rule import TriggerRule
 
-APP_NAME = "spark-job-test01"
+APP_NAME = "my-spark-job"
 NAMESPACE = "default"
-SPARK_DRIVER_LABEL = f"spark-app-selector={APP_NAME}"
+SPARK_DRIVER_LABEL = f"park-role=driver,spark-app-selector={APP_NAME}"
 
 
 def get_driver_pod_names():
@@ -81,6 +81,7 @@ def get_pod_phase(pod_name):
         logging.error(f"查询Pod {pod_name} 状态时发生未知错误: {str(e)}")
         return "Unknown"
 
+
 def get_kubectl_pod_status(pod_name):
     """
     获取与 `kubectl get pods` STATUS 列完全一致的Pod状态
@@ -142,6 +143,7 @@ def wait_driver_and_get_name(submit_wait_timeout=3600, submit_check_interval=10,
     """
     ti = kwargs['ti']
     dag_run = kwargs['dag_run']
+    ti.xcom_push(key='driver_namespace', value=NAMESPACE)
 
     # ---- 1) 等待 spark_submit 开始运行 ----
     submit_start_ts = time.time()
@@ -171,7 +173,6 @@ def wait_driver_and_get_name(submit_wait_timeout=3600, submit_check_interval=10,
 
     if not seen_start:
         print(f"[wait_driver] timeout waiting for spark_submit to start (timeout={submit_wait_timeout}s)")
-        ti.xcom_push(key='driver_pod_name', value=None)
         return None
 
     # ---- 2) spark_submit 已开始，轮询获取 driver pod 名称 ----
@@ -222,11 +223,11 @@ with DAG(
     # 1) spark-submit（正常的 shell 提交，保留 stdout 到 Airflow UI）
     spark_submit = BashOperator(
         task_id="spark_submit",
-        bash_command="""
+        bash_command=f"""
         /opt/spark/bin/spark-submit \
           --master k8s://https://kubernetes.default.svc \
           --deploy-mode cluster \
-          --name my-spark-job \
+          --name {APP_NAME} \
           --class org.example.Main \
           local:///opt/spark/app.jar
         """,
@@ -243,37 +244,30 @@ with DAG(
         task_id="spark_logs_and_cleanup",
         bash_command="""
 DRIVER_POD="{{ ti.xcom_pull(task_ids='wait_driver', key='driver_pod_name') }}"
-NAMESPACE="default"
+NAMESPACE="{{ ti.xcom_pull(task_ids='wait_driver', key='driver_namespace') }}"
 if [ -z "$DRIVER_POD" ] || [ "$DRIVER_POD" = "None" ]; then
   echo "[logs_and_cleanup] no driver pod name, skipping logs & cleanup"
   exit 0
 fi
 
 echo "[logs_and_cleanup] start following logs for pod: $DRIVER_POD"
-# 后台跟随日志（输出到 task stdout，让 Airflow UI 实时展示）
-kubectl logs -f $DRIVER_POD -n $NAMESPACE --tail=100 | stdbuf -oL cat &
-LOG_PID=$!
-echo "[logs_and_cleanup] log follower pid=$LOG_PID"
+kubectl logs -f $DRIVER_POD -n $NAMESPACE --ignore-errors=true
 
-# 轮询 driver pod 的 phase，等到 Succeeded/Failed/NotFound 才认为作业结束
-while true; do
-  PHASE=$(kubectl get pod $DRIVER_POD -n $NAMESPACE -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-  echo "[logs_and_cleanup] pod $DRIVER_POD phase=$PHASE"
-  if [ "$PHASE" = "Succeeded" ] || [ "$PHASE" = "Failed" ] || [ "$PHASE" = "NotFound" ]; then
-    echo "[logs_and_cleanup] pod finished with phase=$PHASE, proceeding to cleanup"
-    break
-  fi
-  sleep 5
-done
+echo "[logs_and_cleanup] extracting SparkJobResult"
+RESULT_LINE=$(kubectl logs $DRIVER_POD -n $NAMESPACE --ignore-errors=true --tail=1000 | grep "SparkJobResult:")
+#RESULT_LINE=$(kubectl logs "$DRIVER_POD" -n "$NAMESPACE" --ignore-errors=true --tail=1000 | grep "SparkJobResult:" | tail -n1)
+
 
 echo "[logs_and_cleanup] deleting pod $DRIVER_POD"
 kubectl delete pod $DRIVER_POD -n $NAMESPACE --ignore-not-found=true
 
-# give logs a moment to flush, then kill background follower
-sleep 2
-kill $LOG_PID 2>/dev/null || true
-wait $LOG_PID 2>/dev/null || true
 echo "[logs_and_cleanup] finished"
+# show the result of spark job
+if [ -n "$RESULT_LINE" ]; then
+  echo "[logs_and_cleanup] final SparkJobResult: $RESULT_LINE"
+else
+  echo "[logs_and_cleanup] SparkJobResult not found in logs"
+fi
 """,
         # 如果你希望即使 wait_driver/spark_submit 失败也执行（但脚本自己会跳过无 pod 情形），可以用 ALL_DONE
         trigger_rule=TriggerRule.ALL_DONE,
